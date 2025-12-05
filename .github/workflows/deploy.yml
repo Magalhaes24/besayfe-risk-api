@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          if [ -d "tests" ]; then pytest -q; else echo "No tests directory, skipping."; fi
+
+      - name: Build Docker image
+        run: |
+          docker build -f docker/Dockerfile -t allergen-api:latest .
+
+      # Optional: push to GHCR if secrets are provided
+      - name: Log in to GHCR
+        if: secrets.GITHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: secrets.GITHUB_TOKEN != ''
+        run: |
+          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/allergen-api
+          docker tag allergen-api:latest $IMAGE_ID:latest
+          docker push $IMAGE_ID:latest

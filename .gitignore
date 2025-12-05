@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.env
+.DS_Store
+.idea/
+.vscode/
+db/foodb_2020_04_07_csv/
+db/history/*.csv
+
