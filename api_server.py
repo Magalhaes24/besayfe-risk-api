@@ -47,6 +47,14 @@ app.add_middleware(
 class RiskRequest(BaseModel):
     barcode: str = Field(..., description="Product EAN/UPC barcode")
     user_allergens: List[str] = Field(..., description="List of allergen codes (e.g., MILK, PEANUT)")
+    consider_may_contain: bool = Field(
+        True,
+        description="If true, treat 'may contain' / traces as risky (default: true).",
+    )
+    consider_facility: bool = Field(
+        False,
+        description="If true, include facility cross-contact in scoring (default: false).",
+    )
 
     @validator("user_allergens")
     def _normalize_allergens(cls, v: List[str]) -> List[str]:
@@ -125,15 +133,19 @@ def risk(request: RiskRequest):
     # Run engine
     profile = UserAllergyProfile(
         allergen_codes=request.user_allergens,
-        avoid_traces=True,
-        avoid_facility_risk=True,
+        avoid_traces=request.consider_may_contain,
+        avoid_facility_risk=request.consider_facility,
     )
     result = engine.assess(ean=request.barcode, user_profile=profile)
     if not result:
         raise HTTPException(status_code=500, detail="Unable to compute risk for product")
 
     # Cross-contact per allergen
-    cross_contact = _compute_cross_contact(result.product, profile.normalized_codes())
+    cross_contact = (
+        _compute_cross_contact(result.product, profile.normalized_codes())
+        if request.consider_facility
+        else {}
+    )
 
     # Risk breakdown
     per_allergen = {
