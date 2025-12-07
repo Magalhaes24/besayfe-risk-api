@@ -30,12 +30,13 @@ def _safe_inv_logit(x: float) -> float:
 
 @dataclass
 class CrossContactConfig:
-    mu_category: float = 0.0
-    sigma_category: float = 0.8
-    sigma_brand: float = 0.6
-    sigma_gamma: float = 1.0
-    sigma_delta: float = 1.0
-    delta_may_contain_boost: float = 3.0  # strong positive shift for "may contain"
+    # Conservative baseline: a facility with no evidence has a very low prior (~3%)
+    mu_category: float = -3.5  # logit(0.029)
+    sigma_category: float = 0.5
+    sigma_brand: float = 0.3
+    sigma_gamma: float = 0.5
+    sigma_delta: float = 0.5
+    delta_may_contain_boost: float = 2.5  # positive shift for "may contain"
 
 
 def _ingredient_signal(product: Dict, allergen: str) -> float:
@@ -112,6 +113,7 @@ def estimate_cross_contact(product: Dict, allergen: str, config: Optional[CrossC
         "probability": prob_mean,
         "lower_ci": lower,
         "upper_ci": upper,
+        "signal": signal,
     }
 
 
@@ -144,12 +146,17 @@ def final_cross_contact_risk(product: Dict, allergen: str, config: Optional[Cros
     bhm = estimate_cross_contact(product, allergen, config=config)
     presence = ingredient_presence_flag(product, allergen)
     may_flag = may_contain_flag(product, allergen)
-    risk = min(1.0, presence + 0.7 * may_flag + 0.5 * bhm["probability"])
+    # If there is no explicit evidence (no presence, no "may contain", and minimal signal),
+    # dampen the Bayesian prior so obscure allergens do not inflate risk.
+    has_signal = presence > 0 or may_flag > 0 or bhm.get("signal", 0.0) > 0.05
+    base_prob = bhm["probability"] if has_signal else bhm["probability"] * 0.2
+    risk = min(1.0, presence + 0.7 * may_flag + 0.5 * base_prob)
     return {
         "risk": risk,
         "probability": bhm["probability"],
         "lower_ci": bhm["lower_ci"],
         "upper_ci": bhm["upper_ci"],
+        "signal": bhm.get("signal", 0.0),
         "presence": presence,
         "may_contain": may_flag,
     }
