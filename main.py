@@ -292,7 +292,11 @@ def _next_history_id(path: Path) -> int:
 
 
 def append_history(
-    args: argparse.Namespace, result, lang: str, command_label: str = "cli"
+    args: argparse.Namespace,
+    result,
+    lang: str,
+    command_label: str = "cli",
+    request_source: str = "local",
 ) -> None:
     """Persist the last assessment to a simple CSV audit log with richer context."""
     history_path = Path("db/history/history.csv")
@@ -303,6 +307,7 @@ def append_history(
         "ean",
         "user_restrictions",
         "command",
+        "request_source",
         "lang",
         "product_name",
         "brand",
@@ -311,13 +316,32 @@ def append_history(
         "ingredients_snapshot",
     ]
 
+    # Upgrade old history files to include the new request_source column.
+    existing_rows = []
+    rewrite_file = False
+    if history_path.exists():
+        with history_path.open("r", newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames and "request_source" not in reader.fieldnames:
+                rewrite_file = True
+                existing_rows = list(reader)
+
     row = {
         "id": _next_history_id(history_path),
-        "ean": args.ean,
+        "ean": getattr(args, "ean", ""),
         "user_restrictions": ",".join(
-            [code.strip() for code in args.allergies.split(",") if code]
+            [
+                code.strip()
+                for code in (
+                    args.allergies
+                    if isinstance(args.allergies, list)
+                    else str(args.allergies).split(",")
+                )
+                if code
+            ]
         ),
         "command": command_label,
+        "request_source": request_source,
         "lang": lang,
         "product_name": "",
         "brand": "",
@@ -365,12 +389,15 @@ def append_history(
     else:
         row["product_name"] = "NOT_FOUND"
 
-    write_header = not history_path.exists()
-    mode = "a" if history_path.exists() else "w"
+    write_header = not history_path.exists() or rewrite_file
+    mode = "w" if write_header else "a"
     with history_path.open(mode, newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
+            for existing in existing_rows:
+                sanitized = {k: existing.get(k, "") for k in fieldnames}
+                writer.writerow(sanitized)
         writer.writerow(row)
 
 
@@ -419,7 +446,13 @@ def main() -> None:
     result = engine.assess(args.ean, user_profile)
     if not result:
         print(_t("product_not_found", args.lang))
-        append_history(args, result, lang=args.lang, command_label="main_cli")
+        append_history(
+            args,
+            result,
+            lang=args.lang,
+            command_label="main_cli",
+            request_source="local",
+        )
         return
 
     output = {
@@ -450,7 +483,13 @@ def main() -> None:
     else:
         print(render_text_result(result, lang=args.lang))
 
-    append_history(args, result, lang=args.lang, command_label="main_cli")
+    append_history(
+        args,
+        result,
+        lang=args.lang,
+        command_label="main_cli",
+        request_source="local",
+    )
 
 
 if __name__ == "__main__":

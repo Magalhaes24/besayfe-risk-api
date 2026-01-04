@@ -11,12 +11,15 @@ Shared domain models used by the risk engine.
 
 from __future__ import annotations
 
+# Standard library data modeling and typing helpers.
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Iterable, List, Optional
 
 
 class PresenceType(str, Enum):
+    """Declares the form of allergen presence for scoring logic."""
+    # Declares the form of allergen presence for scoring logic.
     CONTAINS = "contains"
     MAY_CONTAIN = "may_contain"
     FACILITY_RISK = "facility_risk"
@@ -40,11 +43,13 @@ class AllergenFact:
         Facility risk uses the weight directly as a probability-style score to
         accommodate the Bayesian cross-contact model outputs.
         """
+        # Facility-risk scores are treated as probabilities on [0, 1].
         if self.presence_type == PresenceType.FACILITY_RISK:
             prob = max(0.0, min(self.weight, 1.0))
             conf = max(0.0, min(self.confidence, 1.0))
             return min(100.0, 100.0 * prob * conf)
 
+        # Other presence types use a base factor plus weight/confidence scaling.
         base = {
             PresenceType.CONTAINS: 1.0,
             PresenceType.MAY_CONTAIN: 0.65,
@@ -68,8 +73,10 @@ class FacilityAllergenProfile:
     proportion_of_products: Optional[float] = None
 
     def to_fact(self, source: str = "facility_profile") -> AllergenFact:
+        # Default missing proportions to a conservative mid-level risk.
         weight = self.proportion_of_products if self.proportion_of_products else 0.5
         confidence = 0.6 if self.proportion_of_products is None else 0.8
+        # Convert the facility profile into a standardized fact entry.
         return AllergenFact(
             allergen_code=self.allergen_code,
             presence_type=PresenceType.FACILITY_RISK,
@@ -94,8 +101,11 @@ class ProductInfo:
     facilities: List[FacilityAllergenProfile] = field(default_factory=list)
     raw_payload: Optional[dict] = None
     traces_tags: Optional[list] = None
+    # Optional diagnostics to explain missing or inconclusive data from a source.
+    data_notes: List[str] = field(default_factory=list)
 
     def allergen_codes(self) -> Iterable[str]:
+        # Return the unique set of allergen codes in the current facts list.
         return {fact.allergen_code for fact in self.allergen_facts}
 
 
@@ -110,11 +120,13 @@ class UserAllergyProfile:
     avoid_facility_risk: bool = False
 
     def normalized_codes(self) -> List[str]:
+        # Normalize allergen codes to the internal uppercase format.
         return [code.upper() for code in self.allergen_codes]
 
 
 @dataclass
 class RiskDetail:
+    """Per-allergen score, reasons, and fact sources."""
     allergen_code: str
     score: float
     reasons: List[str] = field(default_factory=list)
@@ -123,11 +135,13 @@ class RiskDetail:
 
 @dataclass
 class RiskResult:
+    """Overall risk score and the per-allergen breakdown."""
     total_score: float
     product: ProductInfo
     per_allergen: Dict[str, RiskDetail]
 
     def worst_offender(self) -> Optional[RiskDetail]:
+        # Return the allergen with the highest score, if any.
         if not self.per_allergen:
             return None
         return max(self.per_allergen.values(), key=lambda d: d.score)

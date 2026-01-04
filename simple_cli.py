@@ -11,9 +11,11 @@ Usage:
 """
 import argparse
 from pathlib import Path
+from typing import Optional
 
 from risk_engine import (
     FoodDatabase,
+    ImageTextProductSource,
     OpenFoodFactsClient,
     RiskEngine,
     UserAllergyProfile,
@@ -65,10 +67,41 @@ def prompt_allergens(lang: str = "en") -> list[str]:
         return codes
 
 
+def prompt_input_mode(lang: str = "en") -> str:
+    """Ask whether to assess by barcode or image input."""
+    while True:
+        raw = input("Input type [barcode/image]: ").strip().lower()
+        if raw in ("barcode", "b", "ean"):
+            return "barcode"
+        if raw in ("image", "img", "i"):
+            return "image"
+        print("Please enter 'barcode' or 'image'.")
+
+
+def prompt_image_path() -> Path:
+    """Prompt until the user provides a readable image path."""
+    while True:
+        raw = input("Image file path: ").strip().strip('"')
+        if not raw:
+            print("Please enter a file path.")
+            continue
+        path = Path(raw)
+        if not path.exists() or not path.is_file():
+            print("File not found. Please enter a valid image file path.")
+            continue
+        return path
+
+
 def main() -> None:
     lang = input(_t("prompt_language", "en")).strip() or "en"
     print(_t("cli_title", lang))
-    ean = input(_t("prompt_ean", lang)).strip()
+    input_mode = prompt_input_mode(lang=lang)
+    ean = ""
+    image_path: Optional[Path] = None
+    if input_mode == "barcode":
+        ean = input(_t("prompt_ean", lang)).strip()
+    else:
+        image_path = prompt_image_path()
     allergy_codes = prompt_allergens(lang=lang)
     avoid_traces = prompt_bool(_t("prompt_may_contain", lang), default=True)
     avoid_facility = prompt_bool(_t("prompt_facility", lang), default=False)
@@ -91,7 +124,17 @@ def main() -> None:
     client = OpenFoodFactsClient()
     engine = RiskEngine(product_source=client, food_database=food_db)
 
-    result = engine.assess(ean=ean, user_profile=user_profile)
+    if input_mode == "barcode":
+        result = engine.assess(ean=ean, user_profile=user_profile)
+    else:
+        ocr_source = ImageTextProductSource(lang="eng")
+        image_bytes = image_path.read_bytes() if image_path else b""
+        product = ocr_source.product_from_image(
+            image_bytes=image_bytes,
+            reference_id=image_path.name if image_path else "image-input",
+            name=image_path.name if image_path else "Image input",
+        )
+        result = engine.assess_product(product, user_profile=user_profile)
     if not result:
         print(_t("product_not_found", lang))
         return
@@ -100,8 +143,17 @@ def main() -> None:
     print(render_text_result(result, lang=lang))
 
     # Persist a history row matching the main CLI format for consistency.
-    args_namespace = argparse.Namespace(ean=ean, allergies=",".join(allergy_codes))
-    append_history(args_namespace, result, lang=lang, command_label="simple_cli")
+    args_namespace = argparse.Namespace(
+        ean=ean or (image_path.name if image_path else "image-input"),
+        allergies=",".join(allergy_codes),
+    )
+    append_history(
+        args_namespace,
+        result,
+        lang=lang,
+        command_label="simple_cli",
+        request_source="local" if input_mode == "barcode" else "image",
+    )
 
 
 if __name__ == "__main__":

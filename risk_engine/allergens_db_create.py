@@ -1,13 +1,3 @@
-from __future__ import annotations
-
-import re
-import unicodedata
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
-
-import pandas as pd
-
 """
 Scan FoodDB CSV rows and flag ingredients that fit the 14 Annex II allergen
 categories. Each output row represents one food record matched to a single
@@ -19,6 +9,18 @@ Notes:
   from the milk category.
 """
 
+from __future__ import annotations
+
+# Standard library helpers for text normalization and file paths.
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+# Pandas is used for CSV I/O and DataFrame assembly.
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parent.parent
 FOOD_CSV = ROOT / "db" / "foodb_2020_04_07_csv" / "Food.csv"
 OUTPUT_CSV = ROOT / "db" / "allergens.csv"
@@ -26,6 +28,7 @@ OUTPUT_CSV = ROOT / "db" / "allergens.csv"
 
 def _normalize(text: str) -> str:
     """Lowercase, strip accents, and collapse whitespace for tolerant matching."""
+    # Normalize accents and punctuation for matching rules.
     decomposed = unicodedata.normalize("NFKD", text or "")
     stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     lowered = stripped.lower()
@@ -37,6 +40,7 @@ def _normalize(text: str) -> str:
 
 def _word_present(text: str, needle: str) -> bool:
     """Check if needle appears as a full word/phrase in text."""
+    # Use a regex with word boundaries to prevent partial matches.
     if not needle:
         return False
     pattern = rf"(?<!\w){re.escape(needle)}(?!\w)"
@@ -52,6 +56,7 @@ class AllergenRule:
     exclude_phrases: List[str] = field(default_factory=list)
 
     def normalize(self) -> "AllergenRule":
+        # Normalize all keyword and exclusion phrases for matching.
         normalized_keywords = [(_normalize(term), score) for term, score in self.keywords]
         normalized_excludes = [_normalize(term) for term in self.exclude_phrases]
         return AllergenRule(
@@ -63,9 +68,11 @@ class AllergenRule:
 
 
 def _kw(score: int, *terms: str) -> List[Tuple[str, int]]:
+    # Convenience helper for building keyword/score lists.
     return [(term, score) for term in terms]
 
 
+# Plant-based milk phrases that should not count as dairy.
 PLANT_MILK_PHRASES = [
     "soy milk",
     "soya milk",
@@ -81,6 +88,7 @@ PLANT_MILK_PHRASES = [
     "pistachio milk",
 ]
 
+# Keyword rules for each Annex II allergen category.
 ALLERGEN_RULES: List[AllergenRule] = [
     AllergenRule(
         code="gluten",
@@ -380,6 +388,7 @@ ALLERGEN_RULES = [rule.normalize() for rule in ALLERGEN_RULES]
 
 def _strip_excludes(text: str, excludes: Iterable[str]) -> str:
     """Remove excluded phrases before matching to avoid false positives."""
+    # Remove excluded phrases like "soy milk" before searching for "milk".
     stripped = text
     for phrase in excludes:
         if not phrase:
@@ -393,11 +402,13 @@ def detect_allergens_in_fields(fields: List[str]) -> List[Tuple[str, str, int]]:
     Return a list of (code, category, rating) matches for the provided text fields.
     A rating is the maximum score among matched keywords for that category.
     """
+    # Normalize each input field before matching.
     normalized_fields = [_normalize(value) for value in fields if value]
     best_scores: Dict[str, Tuple[str, int]] = {}
 
     for field_text in normalized_fields:
         for rule in ALLERGEN_RULES:
+            # Remove excluded phrases then scan for any rule keywords.
             processed_text = _strip_excludes(field_text, rule.exclude_phrases)
             score = 0
             for phrase, value in rule.keywords:
@@ -408,6 +419,7 @@ def detect_allergens_in_fields(fields: List[str]) -> List[Tuple[str, str, int]]:
                 if score > current[1]:
                     best_scores[rule.code] = (rule.category, score)
 
+    # Convert the best scores into a compact list of matches.
     matches: List[Tuple[str, str, int]] = []
     for code, (category, rating) in best_scores.items():
         if rating:
@@ -416,6 +428,7 @@ def detect_allergens_in_fields(fields: List[str]) -> List[Tuple[str, str, int]]:
 
 
 def main() -> None:
+    # Load the FoodDB dataset and scan for allergen keyword hits.
     df = pd.read_csv(FOOD_CSV)
     matches = []
 
@@ -431,6 +444,7 @@ def main() -> None:
         if not hits:
             continue
 
+        # Produce one output row per allergen hit for downstream consumption.
         base_row = row.to_dict()
         for code, category, rating in hits:
             row_data = dict(base_row)
@@ -441,13 +455,16 @@ def main() -> None:
             row_data["allergen_category"] = category
             matches.append(row_data)
 
+    # Write results to a CSV compatible with the rest of the pipeline.
     allergens_df = pd.DataFrame(matches)
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     allergens_df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8")
 
+    # Emit a short summary for CLI usage.
     print(f"Done! Found {len(allergens_df)} allergen rows.")
     print(f"Saved to {OUTPUT_CSV}")
 
 
 if __name__ == "__main__":
+    # Allow running as a script.
     main()

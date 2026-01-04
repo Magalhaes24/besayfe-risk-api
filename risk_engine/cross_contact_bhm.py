@@ -12,19 +12,23 @@ logit scale.
 """
 from __future__ import annotations
 
+# Standard library math helpers and typing.
 import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
+# Numerical utilities for array-compatible math (optional but handy).
 import numpy as np
 
 
 def _safe_logit(p: float, eps: float = 1e-6) -> float:
+    # Clamp to avoid infinities in the logit transform.
     p = min(max(p, eps), 1 - eps)
     return math.log(p / (1 - p))
 
 
 def _safe_inv_logit(x: float) -> float:
+    # Numerically stable inverse logit.
     return 1 / (1 + math.exp(-x))
 
 
@@ -45,6 +49,7 @@ def _ingredient_signal(product: Dict, allergen: str) -> float:
     The caller should provide category_stats/brand_stats with 'freq' and
     'co_occurrence' keys between 0 and 1. Missing stats default to 0.
     """
+    # Read feature stats from the product payload.
     cat = product.get("category_stats", {}).get(allergen, {})
     brand = product.get("brand_stats", {}).get(allergen, {})
     freq_cat = float(cat.get("freq", 0.0))
@@ -73,6 +78,7 @@ def estimate_cross_contact(product: Dict, allergen: str, config: Optional[CrossC
     Returns:
         dict with probability, lower_ci, upper_ci (floats in [0,1])
     """
+    # Use default config if no overrides were provided.
     cfg = config or CrossContactConfig()
 
     # Priors / effects
@@ -122,6 +128,7 @@ def ingredient_presence_flag(product: Dict, allergen: str) -> float:
     Heuristic presence flag: returns 1.0 if the allergen is explicitly declared
     in product['allergens'], else 0.
     """
+    # Treat declared allergens as definitive presence.
     declared = product.get("allergens", [])
     return 1.0 if allergen in declared else 0.0
 
@@ -130,6 +137,7 @@ def may_contain_flag(product: Dict, allergen: str) -> float:
     """
     Returns 1.0 if traces/may contain is present for the allergen.
     """
+    # Use the may_contain map if provided by the caller.
     return 1.0 if product.get("may_contain", {}).get(allergen, False) else 0.0
 
 
@@ -143,13 +151,16 @@ def final_cross_contact_risk(product: Dict, allergen: str, config: Optional[Cros
                      0.7 * may_contain_flag +
                      0.5 * p_bhm)
     """
+    # Estimate the Bayesian component first.
     bhm = estimate_cross_contact(product, allergen, config=config)
+    # Convert raw inputs into simple indicator features.
     presence = ingredient_presence_flag(product, allergen)
     may_flag = may_contain_flag(product, allergen)
     # If there is no explicit evidence (no presence, no "may contain", and minimal signal),
     # dampen the Bayesian prior so obscure allergens do not inflate risk.
     has_signal = presence > 0 or may_flag > 0 or bhm.get("signal", 0.0) > 0.05
     base_prob = bhm["probability"] if has_signal else bhm["probability"] * 0.2
+    # Blend the evidence into a capped risk score.
     risk = min(1.0, presence + 0.7 * may_flag + 0.5 * base_prob)
     return {
         "risk": risk,

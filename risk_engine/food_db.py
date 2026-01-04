@@ -1,5 +1,13 @@
+"""
+FoodDB enrichment helpers.
+
+Loads FoodDB CSV records, filters to relevant allergen-bearing categories, and
+uses keyword rules to infer allergen facts from ingredient text.
+"""
+
 from __future__ import annotations
 
+# Standard library helpers for CSV parsing, paths, and tokenization.
 import csv
 import re
 from dataclasses import dataclass
@@ -11,6 +19,7 @@ from .models import AllergenFact, PresenceType, ProductInfo
 
 @dataclass(frozen=True)
 class FoodRecord:
+    """Normalized FoodDB row for ingredient group matching."""
     id: str
     name: str
     description: str
@@ -19,6 +28,7 @@ class FoodRecord:
     food_type: str
 
     def summary(self) -> str:
+        # Provide a compact group/subgroup label for diagnostics.
         subgroup = self.food_subgroup or "unknown subgroup"
         group = self.food_group or "unknown group"
         return f"{group}/{subgroup}"
@@ -122,19 +132,23 @@ class FoodDatabase:
     )
 
     def __init__(self, csv_path: Optional[str] = None, preload: bool = True):
+        # Store paths and initialize the in-memory index.
         self.csv_path = Path(csv_path) if csv_path else self.DEFAULT_CSV_PATH
         self.records: List[FoodRecord] = []
         self.token_index: Dict[str, List[FoodRecord]] = {}
         self.loaded = False
+        # Optionally preload FoodDB records at startup.
         if preload and self.csv_path.exists():
             self._load()
 
     def _load(self) -> None:
+        # Build the record list and token index from the CSV.
         self.records.clear()
         self.token_index.clear()
         with self.csv_path.open("r", encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
+                # Normalize CSV rows into FoodRecord entries.
                 record = FoodRecord(
                     id=row.get("id", ""),
                     name=row.get("name", ""),
@@ -143,9 +157,11 @@ class FoodDatabase:
                     food_subgroup=row.get("food_subgroup", ""),
                     food_type=row.get("food_type", ""),
                 )
+                # Skip records that do not appear relevant to allergen detection.
                 if not self._is_relevant(record):
                     continue
                 self.records.append(record)
+                # Build a token index for quick matching.
                 for token in self._tokens_for_record(record):
                     if token not in self.token_index:
                         self.token_index[token] = []
@@ -159,6 +175,7 @@ class FoodDatabase:
         Analyze product ingredient text and add allergen facts using FoodDB relationships.
         Only allergen codes present in user_allergen_codes are emitted to avoid noise.
         """
+        # Bail out early if the FoodDB dataset has not been loaded.
         if not self.loaded:
             return []
         raw = product.raw_payload or {}
@@ -166,11 +183,13 @@ class FoodDatabase:
         if not ingredient_texts:
             return []
 
+        # Tokenize ingredient text and restrict to the user's tracked allergens.
         normalized_codes = {code.upper() for code in user_allergen_codes}
         tokens: Set[str] = set()
         for text in ingredient_texts:
             tokens.update(self._tokenize(text))
 
+        # Apply keyword rules to generate inferred allergen facts.
         facts: List[AllergenFact] = []
         for token in tokens:
             for code, weight, confidence, _reason in self.KEYWORD_RULES.get(token, []):
@@ -180,6 +199,7 @@ class FoodDatabase:
                     # Avoid treating plant-based milks (e.g., soy/almond/oat milk) as dairy allergens
                     # when no dairy markers are present.
                     continue
+                # Emit a fact for each matching keyword rule.
                 facts.append(
                     AllergenFact(
                         allergen_code=code,
@@ -192,6 +212,7 @@ class FoodDatabase:
         return facts
 
     def _collect_ingredient_texts(self, raw: Dict) -> List[str]:
+        # Gather ingredient text fields from the raw payload.
         texts: List[str] = []
         for key in (
             "ingredients_text_en",
@@ -202,6 +223,7 @@ class FoodDatabase:
             text = raw.get(key)
             if text:
                 texts.append(str(text))
+        # Add text from structured ingredient objects.
         ingredients_list = raw.get("ingredients") or []
         for ing in ingredients_list:
             if not isinstance(ing, dict):
@@ -212,6 +234,7 @@ class FoodDatabase:
         return texts
 
     def _tokens_for_record(self, record: FoodRecord) -> Set[str]:
+        # Tokenize record fields to build the lookup index.
         tokens = set()
         for field in (
             record.name,
@@ -223,21 +246,26 @@ class FoodDatabase:
         return tokens
 
     def _tokens_from_text(self, text: str) -> List[str]:
+        # Normalize and split text into tokens longer than 2 characters.
         normalized = self._normalize(text)
         return [tok for tok in normalized.split() if len(tok) > 2]
 
     def _tokenize(self, text: str) -> List[str]:
+        # Alias to keep tokenization logic centralized.
         return self._tokens_from_text(text)
 
     def _normalize(self, text: str) -> str:
+        # Lowercase and strip non-alphanumeric characters for uniform matching.
         return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
     def _is_relevant(self, record: FoodRecord) -> bool:
+        # Check whether the record's categories include allergen-related keywords.
         haystack = f"{record.food_group} {record.food_subgroup} {record.name}".lower()
         return any(keyword in haystack for keyword in self.RELEVANT_GROUP_KEYWORDS)
 
     @staticmethod
     def _is_plant_based_milk_token(tokens: Set[str]) -> bool:
+        # Detect "milk" entries that are clearly plant-based to avoid dairy false positives.
         if "milk" not in tokens:
             return False
         plant_markers = {

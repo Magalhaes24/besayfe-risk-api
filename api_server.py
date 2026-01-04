@@ -13,20 +13,23 @@ Deployment tips (see comments at bottom) include Render, Railway, Fly.io, Codesp
 
 from __future__ import annotations
 
+import argparse
 from typing import Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
 from risk_engine import (
     FoodDatabase,
+    ImageTextProductSource,
     OpenFoodFactsClient,
     RiskEngine,
     UserAllergyProfile,
 )
 from risk_engine.cross_contact_bhm import final_cross_contact_risk
+from main import append_history
 
 app = FastAPI(
     title="Allergen Risk API",
@@ -65,6 +68,7 @@ class RiskResponse(BaseModel):
     product: Dict
     cross_contact: Dict
     risk: Dict
+    summary: Optional[Dict] = None
 
 
 # Shared singletons
@@ -78,18 +82,48 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-def _product_dict(product) -> Dict:
+@app.get("/")
+def root() -> Dict[str, str]:
+    """Basic landing route to avoid 404s on the root path."""
+    return {"status": "ok", "service": "allergen-risk-api"}
+
+
+@app.get("/favicon.ico")
+def favicon() -> Dict[str, str]:
+    """Placeholder favicon route to avoid browser 404 noise."""
+    return {"status": "ok"}
+
+
+def _product_dict(product, include_raw: bool = True) -> Dict:
     """Serialize ProductInfo into a JSON-friendly dict."""
     payload = product.raw_payload or {}
-    return {
+    data = {
         "ean": product.ean,
         "name": product.name,
         "brand": product.brand,
         "source": product.source,
+        "data_notes": getattr(product, "data_notes", []),
         "allergens_tags": payload.get("allergens_tags"),
         "traces_tags": payload.get("traces_tags"),
         "ingredients_text": payload.get("ingredients_text_en") or payload.get("ingredients_text"),
-        "raw": payload,
+    }
+    if include_raw:
+        data["raw"] = payload
+    return data
+
+
+def _summary_dict(result) -> Dict:
+    """Create a compact, human-friendly summary for the response."""
+    return {
+        "product": f"{result.product.name} ({result.product.ean})",
+        "total_score": result.total_score,
+        "allergens_found": [
+            f"{fact.allergen_code}:{fact.presence_type.value}"
+            for fact in result.product.allergen_facts
+        ],
+        "ingredients_text": (result.product.raw_payload or {}).get("ingredients_text")
+        or (result.product.raw_payload or {}).get("ingredients_text_en")
+        or "",
     }
 
 
@@ -124,7 +158,7 @@ def _compute_cross_contact(product, allergen_codes: List[str]) -> Dict[str, Dict
 
 
 @app.post("/risk", response_model=RiskResponse)
-def risk(request: RiskRequest):
+def risk(request: RiskRequest, include_raw: bool = True):
     # Fetch product
     product = client.get_product(request.barcode)
     if not product:
@@ -157,12 +191,102 @@ def risk(request: RiskRequest):
     }
 
     response = {
-        "product": _product_dict(result.product),
+        "product": _product_dict(result.product, include_raw=include_raw),
         "cross_contact": cross_contact,
         "risk": {
             "per_allergen": per_allergen,
             "final_score": result.total_score,
         },
+        "summary": _summary_dict(result),
+    }
+
+    # Best-effort audit log to the shared history.csv with API source marker.
+    try:
+        append_history(
+            argparse.Namespace(
+                ean=request.barcode, allergies=request.user_allergens
+            ),
+            result,
+            lang="en",
+            command_label="api_risk",
+            request_source="api",
+        )
+    except Exception:
+        # Logging failures should not break the API response
+        pass
+    return response
+
+
+@app.post("/risk/image", response_model=RiskResponse)
+def risk_from_image(
+    file: UploadFile = File(..., description="Image of label/menu/technical sheet"),
+    user_allergens: str = Form(..., description="Comma-separated allergen codes"),
+    consider_may_contain: bool = Form(
+        True, description="If true, treat 'may contain' / traces as risky."
+    ),
+    consider_facility: bool = Form(
+        False, description="If true, include facility cross-contact in scoring."
+    ),
+    ocr_lang: str = Form("eng", description="Tesseract language code (default: eng)"),
+    tesseract_cmd: Optional[str] = Form(
+        None, description="Optional path to tesseract.exe if not on PATH"
+    ),
+    reference_id: Optional[str] = Form(
+        None, description="Optional identifier for the image input"
+    ),
+    include_raw: bool = Form(
+        False, description="Include raw OCR payload in the response (default: false)"
+    ),
+):
+    codes = [code.strip().upper() for code in user_allergens.split(",") if code.strip()]
+    if not codes:
+        raise HTTPException(status_code=400, detail="user_allergens must include at least one code")
+
+    image_bytes = file.file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    ocr_source = ImageTextProductSource(
+        lang=ocr_lang or "eng", tesseract_cmd=tesseract_cmd
+    )
+    try:
+        product = ocr_source.product_from_image(
+            image_bytes=image_bytes,
+            reference_id=reference_id or file.filename,
+            name=file.filename or "Image input",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"OCR failed: {exc}") from exc
+
+    profile = UserAllergyProfile(
+        allergen_codes=codes,
+        avoid_traces=consider_may_contain,
+        avoid_facility_risk=consider_facility,
+    )
+    result = engine.assess_product(product, user_profile=profile)
+    if not result:
+        raise HTTPException(status_code=500, detail="Unable to compute risk for OCR input")
+
+    cross_contact = (
+        _compute_cross_contact(result.product, profile.normalized_codes())
+        if consider_facility
+        else {}
+    )
+    per_allergen = {
+        code: {
+            "score": detail.score,
+            "reasons": detail.reasons,
+        }
+        for code, detail in result.per_allergen.items()
+    }
+    response = {
+        "product": _product_dict(result.product, include_raw=include_raw),
+        "cross_contact": cross_contact,
+        "risk": {
+            "per_allergen": per_allergen,
+            "final_score": result.total_score,
+        },
+        "summary": _summary_dict(result),
     }
     return response
 
