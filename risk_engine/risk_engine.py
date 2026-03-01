@@ -42,10 +42,26 @@ class RiskEngine:
     # Proximity-based contamination boosts: if a triggering allergen is present,
     # slightly raise risk for a closely related allergen (e.g., nuts -> peanut).
     PROXIMITY_TRIGGERS = {
-        # Hazelnut/tree nuts often share lines with peanuts, so elevate peanut risk.
-        "PEANUT": [("TREE_NUTS", 0.35, 0.6, "Close contact with tree nuts (e.g., hazelnut)")],
-        # The reverse: peanut handling can contaminate other nuts.
-        "TREE_NUTS": [("PEANUT", 0.35, 0.6, "Close contact with peanuts")],
+        # Peanut is handled like a nut category for risk signaling.
+        "PEANUT": [
+            (
+                "TREE_NUTS",
+                1.0,
+                1.0,
+                "Peanuts are a nut family and indicate nut exposure",
+                PresenceType.CONTAINS,
+            )
+        ],
+        # The reverse: tree nut handling can contaminate peanut lines.
+        "TREE_NUTS": [
+            (
+                "PEANUT",
+                0.8,
+                0.85,
+                "Close contact with peanuts",
+                PresenceType.MAY_CONTAIN,
+            )
+        ],
     }
 
     def __init__(
@@ -214,12 +230,12 @@ class RiskEngine:
         # Only emit proximity facts if the triggering allergen is already present.
         existing_codes = {fact.allergen_code for fact in product.allergen_facts}
         facts: List[AllergenFact] = []
-        for trigger_code, weight, confidence, rationale in triggers:
+        for trigger_code, weight, confidence, rationale, presence_type in triggers:
             if trigger_code not in existing_codes:
                 continue
             fact = AllergenFact(
                 allergen_code=target_code.upper(),
-                presence_type=PresenceType.MAY_CONTAIN,
+                presence_type=presence_type,
                 source=f"proximity:{trigger_code.lower()}",
                 weight=weight,
                 confidence=confidence,

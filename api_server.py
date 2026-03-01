@@ -14,6 +14,7 @@ Deployment tips (see comments at bottom) include Render, Railway, Fly.io, Codesp
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from typing import Dict, List, Optional
 
 import uvicorn
@@ -47,9 +48,36 @@ app.add_middleware(
 )
 
 
+class AllergenProfileRequest(BaseModel):
+    profile_id: Optional[str] = Field(
+        None, description="Client-provided identifier for this profile"
+    )
+    user_allergens: List[str] = Field(
+        ..., description="List of allergen codes for this profile"
+    )
+    consider_may_contain: bool = Field(
+        True,
+        description="If true, treat 'may contain' / traces as risky for this profile.",
+    )
+    consider_facility: bool = Field(
+        False,
+        description="If true, include facility cross-contact in scoring for this profile.",
+    )
+
+    @validator("user_allergens")
+    def _normalize_allergens(cls, v: List[str]) -> List[str]:
+        normalized = [code.strip().upper() for code in v if code.strip()]
+        if not normalized:
+            raise ValueError("user_allergens must include at least one code")
+        return normalized
+
+
 class RiskRequest(BaseModel):
     barcode: str = Field(..., description="Product EAN/UPC barcode")
-    user_allergens: List[str] = Field(..., description="List of allergen codes (e.g., MILK, PEANUT)")
+    user_allergens: Optional[List[str]] = Field(
+        None,
+        description="Legacy single profile list of allergen codes (e.g., MILK, PEANUT)",
+    )
     consider_may_contain: bool = Field(
         True,
         description="If true, treat 'may contain' / traces as risky (default: true).",
@@ -58,9 +86,15 @@ class RiskRequest(BaseModel):
         False,
         description="If true, include facility cross-contact in scoring (default: false).",
     )
+    allergen_profiles: Optional[List[AllergenProfileRequest]] = Field(
+        None,
+        description="One or more allergen profiles. If provided, overrides legacy single-profile fields.",
+    )
 
     @validator("user_allergens")
-    def _normalize_allergens(cls, v: List[str]) -> List[str]:
+    def _normalize_allergens(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
         return [code.strip().upper() for code in v if code.strip()]
 
 
@@ -69,6 +103,9 @@ class RiskResponse(BaseModel):
     cross_contact: Dict
     risk: Dict
     summary: Optional[Dict] = None
+    participant_scores: Optional[List[Dict]] = None
+    computed_overall_risk: Optional[float] = None
+    displayed_overall_risk: Optional[float] = None
 
 
 # Shared singletons
@@ -157,31 +194,15 @@ def _compute_cross_contact(product, allergen_codes: List[str]) -> Dict[str, Dict
     return results
 
 
-@app.post("/risk", response_model=RiskResponse)
-def risk(request: RiskRequest, include_raw: bool = True):
-    # Fetch product
-    product = client.get_product(request.barcode)
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found on OpenFoodFacts")
+def _aggregate_scores(scores: List[float]) -> float:
+    """Combine 0-100 scores using complementary probability."""
+    complement = 1.0
+    for score in scores:
+        complement *= max(0.0, 1.0 - min(score, 100.0) / 100.0)
+    return min(100.0, (1.0 - complement) * 100.0)
 
-    # Run engine
-    profile = UserAllergyProfile(
-        allergen_codes=request.user_allergens,
-        avoid_traces=request.consider_may_contain,
-        avoid_facility_risk=request.consider_facility,
-    )
-    result = engine.assess(ean=request.barcode, user_profile=profile)
-    if not result:
-        raise HTTPException(status_code=500, detail="Unable to compute risk for product")
 
-    # Cross-contact per allergen
-    cross_contact = (
-        _compute_cross_contact(result.product, profile.normalized_codes())
-        if request.consider_facility
-        else {}
-    )
-
-    # Risk breakdown
+def _profile_output(result, profile: AllergenProfileRequest) -> Dict:
     per_allergen = {
         code: {
             "score": detail.score,
@@ -189,24 +210,142 @@ def risk(request: RiskRequest, include_raw: bool = True):
         }
         for code, detail in result.per_allergen.items()
     }
-
-    response = {
-        "product": _product_dict(result.product, include_raw=include_raw),
+    cross_contact = (
+        _compute_cross_contact(result.product, profile.user_allergens)
+        if profile.consider_facility
+        else {}
+    )
+    return {
+        "profile_id": profile.profile_id,
+        "user_allergens": profile.user_allergens,
+        "consider_may_contain": profile.consider_may_contain,
+        "consider_facility": profile.consider_facility,
         "cross_contact": cross_contact,
         "risk": {
             "per_allergen": per_allergen,
             "final_score": result.total_score,
         },
-        "summary": _summary_dict(result),
+    }
+
+
+@app.post("/risk", response_model=RiskResponse)
+def risk(request: RiskRequest, include_raw: bool = True):
+    if (not request.allergen_profiles) and (not request.user_allergens):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either allergen_profiles (one or more) or user_allergens (legacy single profile)",
+        )
+
+    # Fetch product
+    product = client.get_product(request.barcode)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found on OpenFoodFacts")
+
+    # Resolve into one or more effective profiles.
+    if request.allergen_profiles:
+        effective_profiles = request.allergen_profiles
+    else:
+        effective_profiles = [
+            AllergenProfileRequest(
+                profile_id="default",
+                user_allergens=request.user_allergens or [],
+                consider_may_contain=request.consider_may_contain,
+                consider_facility=request.consider_facility,
+            )
+        ]
+
+    profile_results: List[Dict] = []
+    profile_scores: List[float] = []
+    combined_allergen_scores: Dict[str, List[float]] = {}
+    first_result = None
+
+    for idx, p in enumerate(effective_profiles):
+        profile = UserAllergyProfile(
+            allergen_codes=p.user_allergens,
+            avoid_traces=p.consider_may_contain,
+            avoid_facility_risk=p.consider_facility,
+        )
+        # RiskEngine mutates product facts during assessment; use a fresh copy per profile.
+        result = engine.assess_product(product=deepcopy(product), user_profile=profile)
+        if not result:
+            raise HTTPException(status_code=500, detail="Unable to compute risk for product")
+        if idx == 0:
+            first_result = result
+
+        profile_results.append(_profile_output(result, p))
+        profile_scores.append(result.total_score)
+        for code, detail in result.per_allergen.items():
+            combined_allergen_scores.setdefault(code, []).append(detail.score)
+
+    if not first_result:
+        raise HTTPException(status_code=500, detail="Unable to compute risk for product")
+
+    combined_per_allergen = {
+        code: {
+            "score": round(_aggregate_scores(scores), 2),
+            "profile_count": len(scores),
+        }
+        for code, scores in combined_allergen_scores.items()
+    }
+    combined_final_score = round(_aggregate_scores(profile_scores), 2)
+    participant_scores = [
+        {
+            "profile_id": p.get("profile_id"),
+            "final_score": p.get("risk", {}).get("final_score"),
+            "allergens": p.get("user_allergens", []),
+            "per_allergen": p.get("risk", {}).get("per_allergen", {}),
+        }
+        for p in profile_results
+    ]
+    combined_cross_contact: Dict[str, Dict[str, float]] = {}
+    for p in profile_results:
+        for code, value in p["cross_contact"].items():
+            combined_cross_contact[code] = value
+
+    summary = _summary_dict(first_result)
+    summary["total_score"] = combined_final_score
+
+    response = {
+        "product": _product_dict(first_result.product, include_raw=include_raw),
+        "cross_contact": combined_cross_contact,
+        "risk": {
+            "per_allergen": combined_per_allergen,
+            "final_score": combined_final_score,
+            "combined": {
+                "per_allergen": combined_per_allergen,
+                "final_score": combined_final_score,
+            },
+            "profiles": profile_results,
+            "participant_scores": participant_scores,
+            "computed_overall_risk": combined_final_score,
+            "displayed_overall_risk": combined_final_score,
+        },
+        "summary": summary,
+        "participant_scores": participant_scores,
+        "computed_overall_risk": combined_final_score,
+        "displayed_overall_risk": combined_final_score,
     }
 
     # Best-effort audit log to the shared history.csv with API source marker.
     try:
+        history_result = deepcopy(first_result)
+        history_result.total_score = combined_final_score
+        history_result.per_allergen = {
+            code: deepcopy(first_result.per_allergen.get(code))
+            for code in first_result.per_allergen
+        }
         append_history(
             argparse.Namespace(
-                ean=request.barcode, allergies=request.user_allergens
+                ean=request.barcode,
+                allergies=sorted(
+                    {
+                        code
+                        for p in effective_profiles
+                        for code in p.user_allergens
+                    }
+                ),
             ),
-            result,
+            history_result,
             lang="en",
             command_label="api_risk",
             request_source="api",
@@ -285,8 +424,28 @@ def risk_from_image(
         "risk": {
             "per_allergen": per_allergen,
             "final_score": result.total_score,
+            "participant_scores": [
+                {
+                    "profile_id": "default",
+                    "final_score": result.total_score,
+                    "allergens": codes,
+                    "per_allergen": per_allergen,
+                }
+            ],
+            "computed_overall_risk": result.total_score,
+            "displayed_overall_risk": result.total_score,
         },
         "summary": _summary_dict(result),
+        "participant_scores": [
+            {
+                "profile_id": "default",
+                "final_score": result.total_score,
+                "allergens": codes,
+                "per_allergen": per_allergen,
+            }
+        ],
+        "computed_overall_risk": result.total_score,
+        "displayed_overall_risk": result.total_score,
     }
     return response
 

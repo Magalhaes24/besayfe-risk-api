@@ -45,6 +45,28 @@ Request body (JSON):
 ```json
 {
   "barcode": "737628064502",
+  "allergen_profiles": [
+    {
+      "profile_id": "adult",
+      "user_allergens": ["MILK", "GLUTEN"],
+      "consider_may_contain": true,
+      "consider_facility": false
+    },
+    {
+      "profile_id": "child",
+      "user_allergens": ["PEANUT"],
+      "consider_may_contain": true,
+      "consider_facility": true
+    }
+  ]
+}
+```
+
+Backward-compatible single-profile request is still supported:
+
+```json
+{
+  "barcode": "737628064502",
   "user_allergens": ["MILK", "GLUTEN"],
   "consider_may_contain": true,
   "consider_facility": false
@@ -68,10 +90,35 @@ Response (JSON):
   "cross_contact": {},
   "risk": {
     "per_allergen": {
-      "MILK": { "score": 80.0, "reasons": ["..."] },
-      "GLUTEN": { "score": 60.0, "reasons": ["..."] }
+      "MILK": { "score": 80.0, "profile_count": 1 },
+      "GLUTEN": { "score": 60.0, "profile_count": 1 },
+      "PEANUT": { "score": 40.0, "profile_count": 1 }
     },
-    "final_score": 90.0
+    "final_score": 92.0,
+    "combined": {
+      "per_allergen": {
+        "MILK": { "score": 80.0, "profile_count": 1 },
+        "GLUTEN": { "score": 60.0, "profile_count": 1 },
+        "PEANUT": { "score": 40.0, "profile_count": 1 }
+      },
+      "final_score": 92.0
+    },
+    "profiles": [
+      {
+        "profile_id": "adult",
+        "user_allergens": ["MILK", "GLUTEN"],
+        "consider_may_contain": true,
+        "consider_facility": false,
+        "cross_contact": {},
+        "risk": {
+          "per_allergen": {
+            "MILK": { "score": 80.0, "reasons": ["..."] },
+            "GLUTEN": { "score": 60.0, "reasons": ["..."] }
+          },
+          "final_score": 90.0
+        }
+      }
+    ]
   },
   "summary": {
     "product": "Product name (737628064502)",
