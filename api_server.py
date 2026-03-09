@@ -232,6 +232,7 @@ def _profile_output(result, profile: AllergenProfileRequest) -> Dict:
     per_allergen = {
         code: {
             "score": detail.score,
+            "severity": detail.applied_severity.value,
             "reasons": detail.reasons,
         }
         for code, detail in result.per_allergen.items()
@@ -283,6 +284,7 @@ def risk(request: RiskRequest, include_raw: bool = True):
     profile_results: List[Dict] = []
     profile_scores: List[float] = []
     combined_allergen_scores: Dict[str, List[float]] = {}
+    combined_allergen_severities: Dict[str, List[str]] = {}
     first_result = None
 
     for idx, p in enumerate(effective_profiles):
@@ -307,6 +309,9 @@ def risk(request: RiskRequest, include_raw: bool = True):
         profile_scores.append(result.total_score)
         for code, detail in result.per_allergen.items():
             combined_allergen_scores.setdefault(code, []).append(detail.score)
+            combined_allergen_severities.setdefault(code, []).append(
+                detail.applied_severity.value
+            )
 
     if not first_result:
         raise HTTPException(status_code=500, detail="Unable to compute risk for product")
@@ -315,6 +320,7 @@ def risk(request: RiskRequest, include_raw: bool = True):
         code: {
             "score": round(_aggregate_scores(scores), 2),
             "profile_count": len(scores),
+            "severities": combined_allergen_severities.get(code, []),
         }
         for code, scores in combined_allergen_scores.items()
     }

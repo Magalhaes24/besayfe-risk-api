@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
 from risk_engine import (
+    AllergySeverity,
     DatabaseProductSource,
     FacilityAllergenProfile,
     FoodDatabase,
@@ -146,6 +147,15 @@ def parse_args() -> argparse.Namespace:
         default="en",
         help="Language for output labels (e.g. en, pt). Defaults to en.",
     )
+    parser.add_argument(
+        "--allergen-severities",
+        dest="allergen_severities",
+        default=None,
+        help=(
+            "Per-allergen severity as ALLERGEN:LEVEL pairs (comma-separated). "
+            "Levels: LOW, MEDIUM, HIGH. Example: MILK:HIGH,PEANUT:LOW"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -223,8 +233,13 @@ def render_text_result(result, lang: str = "en") -> str:
     lines.append(_t("per_allergen_breakdown", lang))
     for code, detail in _sorted_details(result.per_allergen):
         reasons = "; ".join(detail.reasons)
+        sev_tag = (
+            f" [{detail.applied_severity.value.upper()}]"
+            if detail.applied_severity != AllergySeverity.MEDIUM
+            else ""
+        )
         lines.append(
-            f"  - {_display_name(code, lang)}: {detail.score:.1f}/100 ({risk_label(detail.score, lang)}) "
+            f"  - {_display_name(code, lang)}{sev_tag}: {detail.score:.1f}/100 ({risk_label(detail.score, lang)}) "
             f"{render_bar(detail.score)} | {reasons}"
         )
     return "\n".join(lines)
@@ -410,10 +425,23 @@ def main() -> None:
         resolved = resolve_allergen_code(token)
         resolved_codes.append(resolved if resolved else token.upper())
 
+    sev_map: Dict[str, AllergySeverity] = {}
+    if args.allergen_severities:
+        for pair in args.allergen_severities.split(","):
+            pair = pair.strip()
+            if ":" not in pair:
+                continue
+            code, level = pair.upper().split(":", 1)
+            try:
+                sev_map[code.strip()] = AllergySeverity(level.strip().lower())
+            except ValueError:
+                pass  # ignore unrecognized levels silently
+
     user_profile = UserAllergyProfile(
         allergen_codes=resolved_codes,
         avoid_traces=args.avoid_traces,
         avoid_facility_risk=args.avoid_facility_risk,
+        allergen_severities=sev_map,
     )
     food_db = None
     try:

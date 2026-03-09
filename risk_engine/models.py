@@ -144,6 +144,7 @@ class RiskDetail:
     score: float
     reasons: List[str] = field(default_factory=list)
     facts: List[AllergenFact] = field(default_factory=list)
+    applied_severity: AllergySeverity = AllergySeverity.MEDIUM
 
 
 @dataclass

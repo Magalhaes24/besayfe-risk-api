@@ -164,10 +164,15 @@ class RiskEngine:
             # Scale score by the user's severity for this allergen.
             severity = user_profile.severity_for(code)
             score = min(100.0, score * self.SEVERITY_MULTIPLIERS[severity])
+            if severity != AllergySeverity.MEDIUM:
+                reasons.append(
+                    f"severity: {severity.value} (×{self.SEVERITY_MULTIPLIERS[severity]})"
+                )
 
             # Store the per-allergen breakdown for callers.
             per_allergen[code] = RiskDetail(
-                allergen_code=code, score=score, reasons=reasons, facts=facts
+                allergen_code=code, score=score, reasons=reasons, facts=facts,
+                applied_severity=severity,
             )
 
         # Aggregate per-allergen scores into the overall risk score.
