@@ -49,6 +49,7 @@ Request body (JSON):
     {
       "profile_id": "adult",
       "user_allergens": ["MILK", "GLUTEN"],
+      "allergen_severities": { "MILK": "HIGH", "GLUTEN": "MEDIUM" },
       "consider_may_contain": true,
       "consider_facility": false
     },
@@ -61,6 +62,15 @@ Request body (JSON):
   ]
 }
 ```
+
+`allergen_severities` is optional per profile. Accepted values: `LOW`, `MEDIUM`, `HIGH`.
+Any allergen not listed defaults to `MEDIUM`. The severity scales the computed score:
+
+| Severity | Multiplier | Effect |
+|----------|-----------|--------|
+| `LOW`    | × 0.5     | Halves the score (mild intolerance) |
+| `MEDIUM` | × 1.0     | No change — default |
+| `HIGH`   | × 1.5     | Amplifies the score (anaphylaxis risk), capped at 100 |
 
 Backward-compatible single-profile request is still supported:
 
@@ -143,6 +153,7 @@ Multipart form fields:
 - `ocr_lang`: optional OCR language code (default `eng`)
 - `reference_id`: optional identifier for the image (default filename)
 - `include_raw`: optional (default `false`); include raw OCR payload in response
+- `allergen_severities`: optional JSON object mapping allergen codes to `LOW`/`MEDIUM`/`HIGH`
 
 Example:
 
@@ -151,7 +162,8 @@ curl.exe -X POST "http://localhost:8000/risk/image" \
   -F "file=@C:\path\to\label.jpg" \
   -F "user_allergens=MILK,GLUTEN" \
   -F "consider_may_contain=true" \
-  -F "consider_facility=false"
+  -F "consider_facility=false" \
+  -F 'allergen_severities={"MILK":"HIGH","GLUTEN":"LOW"}'
 ```
 
 OCR notes:
@@ -207,6 +219,12 @@ python main.py --ean 0000000000000 --allergies MILK --avoid-traces --db-dsn "pos
 ### Important implementation details
 
 - Allergen scoring uses complementary probability to avoid double counting.
+- **Allergy severity** scales the per-allergen score after it is computed:
+  `LOW` × 0.5, `MEDIUM` × 1.0 (default), `HIGH` × 1.5 (capped at 100).
+  Severity is set per allergen within each profile; missing entries default to `MEDIUM`.
+- **Multi-person** requests use `allergen_profiles[]`. Each profile is scored
+  independently against a fresh copy of the product; per-allergen scores across
+  profiles are then combined with complementary probability.
 - OCR-derived `contains` facts are treated as fully confident (`confidence=1.0`).
 - OpenFoodFacts tags are normalized to internal codes in `OFF_TAG_TO_CODE`.
 - Missing data is reported via `product.data_notes`.

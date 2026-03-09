@@ -14,6 +14,7 @@ Deployment tips (see comments at bottom) include Render, Railway, Fly.io, Codesp
 from __future__ import annotations
 
 import argparse
+import json
 from copy import deepcopy
 from typing import Dict, List, Optional
 
@@ -23,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
 from risk_engine import (
+    AllergySeverity,
     FoodDatabase,
     ImageTextProductSource,
     OpenFoodFactsClient,
@@ -63,6 +65,13 @@ class AllergenProfileRequest(BaseModel):
         False,
         description="If true, include facility cross-contact in scoring for this profile.",
     )
+    allergen_severities: Optional[Dict[str, str]] = Field(
+        None,
+        description=(
+            "Severity per allergen code: LOW / MEDIUM / HIGH. "
+            "Allergens not listed default to MEDIUM."
+        ),
+    )
 
     @validator("user_allergens")
     def _normalize_allergens(cls, v: List[str]) -> List[str]:
@@ -70,6 +79,23 @@ class AllergenProfileRequest(BaseModel):
         if not normalized:
             raise ValueError("user_allergens must include at least one code")
         return normalized
+
+    @validator("allergen_severities")
+    def _normalize_severities(
+        cls, v: Optional[Dict[str, str]]
+    ) -> Optional[Dict[str, str]]:
+        if v is None:
+            return v
+        valid = {"LOW", "MEDIUM", "HIGH"}
+        result: Dict[str, str] = {}
+        for code, sev in v.items():
+            sev_upper = sev.strip().upper()
+            if sev_upper not in valid:
+                raise ValueError(
+                    f"Invalid severity '{sev}' for '{code}'. Must be LOW, MEDIUM, or HIGH."
+                )
+            result[code.strip().upper()] = sev_upper
+        return result
 
 
 class RiskRequest(BaseModel):
@@ -260,10 +286,15 @@ def risk(request: RiskRequest, include_raw: bool = True):
     first_result = None
 
     for idx, p in enumerate(effective_profiles):
+        severities = {
+            code: AllergySeverity(sev.lower())
+            for code, sev in (p.allergen_severities or {}).items()
+        }
         profile = UserAllergyProfile(
             allergen_codes=p.user_allergens,
             avoid_traces=p.consider_may_contain,
             avoid_facility_risk=p.consider_facility,
+            allergen_severities=severities,
         )
         # RiskEngine mutates product facts during assessment; use a fresh copy per profile.
         result = engine.assess_product(product=deepcopy(product), user_profile=profile)
@@ -376,6 +407,14 @@ def risk_from_image(
     include_raw: bool = Form(
         False, description="Include raw OCR payload in the response (default: false)"
     ),
+    allergen_severities: Optional[str] = Form(
+        None,
+        description=(
+            "Optional JSON object mapping allergen codes to severity levels "
+            "(LOW/MEDIUM/HIGH), e.g. '{\"MILK\":\"HIGH\",\"PEANUT\":\"LOW\"}'. "
+            "Allergens not listed default to MEDIUM."
+        ),
+    ),
 ):
     codes = [code.strip().upper() for code in user_allergens.split(",") if code.strip()]
     if not codes:
@@ -384,6 +423,25 @@ def risk_from_image(
     image_bytes = file.file.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    # Parse optional severity map from JSON string.
+    severities: Dict[str, AllergySeverity] = {}
+    if allergen_severities:
+        try:
+            raw_sev = json.loads(allergen_severities)
+        except Exception:
+            raise HTTPException(
+                status_code=400, detail="allergen_severities must be a valid JSON object"
+            )
+        valid = {"LOW", "MEDIUM", "HIGH"}
+        for code, sev in raw_sev.items():
+            sev_upper = str(sev).strip().upper()
+            if sev_upper not in valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid severity '{sev}' for '{code}'. Must be LOW, MEDIUM, or HIGH.",
+                )
+            severities[code.strip().upper()] = AllergySeverity(sev_upper.lower())
 
     ocr_source = ImageTextProductSource(
         lang=ocr_lang or "eng", tesseract_cmd=tesseract_cmd
@@ -401,6 +459,7 @@ def risk_from_image(
         allergen_codes=codes,
         avoid_traces=consider_may_contain,
         avoid_facility_risk=consider_facility,
+        allergen_severities=severities,
     )
     result = engine.assess_product(product, user_profile=profile)
     if not result:

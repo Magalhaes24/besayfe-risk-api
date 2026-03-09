@@ -20,6 +20,7 @@ from typing import Dict, Iterable, List, Optional
 # Domain models and data sources used to compute risk.
 from .models import (
     AllergenFact,
+    AllergySeverity,
     FacilityAllergenProfile,
     PresenceType,
     ProductInfo,
@@ -38,6 +39,13 @@ class RiskEngine:
     Orchestrates fetching data, standardizing it, and computing a 0-100 risk score.
     Inject different data sources or facility profiles to adapt to your stack.
     """
+
+    # Multipliers applied to the per-allergen score based on allergy severity.
+    SEVERITY_MULTIPLIERS = {
+        AllergySeverity.LOW: 0.5,
+        AllergySeverity.MEDIUM: 1.0,
+        AllergySeverity.HIGH: 1.5,
+    }
 
     # Proximity-based contamination boosts: if a triggering allergen is present,
     # slightly raise risk for a closely related allergen (e.g., nuts -> peanut).
@@ -152,6 +160,10 @@ class RiskEngine:
             else:
                 score = self.fallback_score
                 reasons = self._fallback_reasons(product)
+
+            # Scale score by the user's severity for this allergen.
+            severity = user_profile.severity_for(code)
+            score = min(100.0, score * self.SEVERITY_MULTIPLIERS[severity])
 
             # Store the per-allergen breakdown for callers.
             per_allergen[code] = RiskDetail(

@@ -8,6 +8,7 @@ Expose the main classes so consumers can import directly from the package.
 # Re-export core models for convenient top-level imports.
 from .models import (
     AllergenFact,
+    AllergySeverity,
     FacilityAllergenProfile,
     PresenceType,
     ProductInfo,
@@ -31,6 +32,7 @@ from .allergens import (
 # Keep __all__ in sync with the public symbols above.
 __all__ = [
     "AllergenFact",
+    "AllergySeverity",
     "DatabaseProductSource",
     "FacilityAllergenProfile",
     "PresenceType",

@@ -17,6 +17,13 @@ from enum import Enum
 from typing import Dict, Iterable, List, Optional
 
 
+class AllergySeverity(str, Enum):
+    """How severe a person's allergic reaction is for a given allergen."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class PresenceType(str, Enum):
     """Declares the form of allergen presence for scoring logic."""
     # Declares the form of allergen presence for scoring logic.
@@ -118,10 +125,16 @@ class UserAllergyProfile:
     allergen_codes: List[str]
     avoid_traces: bool = True
     avoid_facility_risk: bool = False
+    # Optional per-allergen severity. Missing entries default to MEDIUM.
+    allergen_severities: Dict[str, AllergySeverity] = field(default_factory=dict)
 
     def normalized_codes(self) -> List[str]:
         # Normalize allergen codes to the internal uppercase format.
         return [code.upper() for code in self.allergen_codes]
+
+    def severity_for(self, code: str) -> AllergySeverity:
+        """Return the severity for a given allergen code, defaulting to MEDIUM."""
+        return self.allergen_severities.get(code.upper(), AllergySeverity.MEDIUM)
 
 
 @dataclass
