@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/franc/PycharmProjects/besayfe-risk-api -type f -not -path */__pycache__/*)",
+      "Bash(python -c \":*)",
+      "Bash(pip install:*)",
+      "Bash(python -m pip install -r requirements.txt -q)"
+    ]
+  }
+}
