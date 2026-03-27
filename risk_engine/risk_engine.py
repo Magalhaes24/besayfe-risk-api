@@ -152,11 +152,7 @@ class RiskEngine:
             if facts:
                 scores = [fact.normalized_score() for fact in facts]
                 score = self._aggregate_scores(scores)
-                reasons = [
-                    f"{fact.presence_type.value} via {fact.source} "
-                    f"(w={fact.weight}, conf={fact.confidence})"
-                    for fact in facts
-                ]
+                reasons = [self._format_reason(fact) for fact in facts]
             else:
                 score = self.fallback_score
                 reasons = self._fallback_reasons(product)
@@ -165,8 +161,11 @@ class RiskEngine:
             severity = user_profile.severity_for(code)
             score = min(100.0, score * self.SEVERITY_MULTIPLIERS[severity])
             if severity != AllergySeverity.MEDIUM:
+                multiplier = self.SEVERITY_MULTIPLIERS[severity]
+                direction = "increases" if multiplier > 1.0 else "reduces"
+                pct = abs(round((multiplier - 1.0) * 100))
                 reasons.append(
-                    f"severity: {severity.value} (×{self.SEVERITY_MULTIPLIERS[severity]})"
+                    f"Your {severity.value.upper()} sensitivity {direction} the score by {pct}%"
                 )
 
             # Store the per-allergen breakdown for callers.
@@ -207,6 +206,71 @@ class RiskEngine:
         # Include a generic fallback suffix so callers know the score is conservative.
         notes.append("Applying conservative fallback score")
         return notes
+
+    @staticmethod
+    def _format_reason(fact: AllergenFact) -> str:
+        """
+        Convert an AllergenFact into a human-readable explanation for callers.
+        """
+        src = fact.source or ""
+        ptype = fact.presence_type
+
+        # Map source prefixes to readable channel names.
+        if src.startswith("proximity:"):
+            related = src.split(":", 1)[1].replace("_", " ").title()
+            if ptype == PresenceType.CONTAINS:
+                return (
+                    f"Cross-family risk: {related} is present and shares an allergen "
+                    f"family with this allergen (confidence {fact.confidence:.0%})"
+                )
+            return (
+                f"Shared-line risk: {related} is handled on the same processing line "
+                f"(confidence {fact.confidence:.0%})"
+            )
+
+        if src.startswith("bhm:"):
+            pct = round(fact.weight * 100)
+            return (
+                f"Bayesian facility model: estimates {pct}% probability of "
+                f"cross-contact based on product category and brand history"
+            )
+
+        if src.startswith("facility_profile"):
+            pct = round(fact.weight * 100)
+            return (
+                f"Facility record: this manufacturing site handles this allergen "
+                f"in {pct}% of its products"
+            )
+
+        if "allergens_tags" in src or "allergens" in src:
+            return "Declared allergen: officially listed on the product's allergen label"
+
+        if "traces_tags" in src or "traces" in src:
+            return "Manufacturer warning: product label states it may contain this allergen"
+
+        if "ingredients_text" in src and "ocr" in src:
+            return "Detected in ingredient text extracted from the product image (OCR)"
+
+        if "ingredients_text" in src:
+            return "Detected in the product's ingredient list text"
+
+        if "fooddb" in src or "inference" in src:
+            return (
+                f"Ingredient inference: FoodDB database identified this allergen in "
+                f"a known ingredient (confidence {fact.confidence:.0%})"
+            )
+
+        if "db:" in src:
+            return "Found in product allergen database record"
+
+        # Generic fallback: still more informative than the raw internal string.
+        channel = src.replace("_", " ").replace(":", " → ")
+        ptype_label = {
+            PresenceType.CONTAINS: "Directly present",
+            PresenceType.MAY_CONTAIN: "Possible trace",
+            PresenceType.FACILITY_RISK: "Facility risk",
+        }.get(ptype, ptype.value)
+        return f"{ptype_label} via {channel} (confidence {fact.confidence:.0%})"
 
     @staticmethod
     def _aggregate_scores(scores: Iterable[float]) -> float:
