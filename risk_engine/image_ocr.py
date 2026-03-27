@@ -4,13 +4,10 @@ OCR-based input flow to build ProductInfo from images (labels, menus, sheets).
 
 from __future__ import annotations
 
-# Standard library helpers for environment inspection and typing.
+import io
 import os
 import re
 from typing import Dict, List, Optional, Tuple
-
-# Third-party HTTP client for OCR.space API calls.
-import io
 
 import requests
 from PIL import Image
@@ -25,7 +22,6 @@ class ImageTextProductSource:
     """
 
     OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
-    DEFAULT_API_KEY = "K87148622888957"
 
     def __init__(
         self,
@@ -35,9 +31,14 @@ class ImageTextProductSource:
         endpoint: Optional[str] = None,
         timeout: float = 30.0,
     ):
-        # Store OCR configuration for OCR.space (Tesseract config is ignored).
+        resolved_key = api_key or os.environ.get("OCR_SPACE_API_KEY")
+        if not resolved_key:
+            raise ValueError(
+                "OCR.space API key is required. "
+                "Set the OCR_SPACE_API_KEY environment variable or pass api_key= explicitly."
+            )
         self.lang = lang
-        self.api_key = api_key or os.environ.get("OCR_SPACE_API_KEY") or self.DEFAULT_API_KEY
+        self.api_key = resolved_key
         self.endpoint = endpoint or self.OCR_SPACE_ENDPOINT
         self.timeout = timeout
         self.tesseract_cmd = tesseract_cmd
@@ -163,8 +164,10 @@ class ImageTextProductSource:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         quality = 85
         scale = 1.0
-        while True:
-            w, h = int(img.width * scale), int(img.height * scale)
+        buf = io.BytesIO()
+        while scale >= 0.1:
+            w = max(1, int(img.width * scale))
+            h = max(1, int(img.height * scale))
             resized = img.resize((w, h), Image.LANCZOS) if scale < 1.0 else img
             buf = io.BytesIO()
             resized.save(buf, format="JPEG", quality=quality)
@@ -175,6 +178,8 @@ class ImageTextProductSource:
                 quality -= 10
             else:
                 scale *= 0.85
+        # Return best-effort result if the size limit could not be reached.
+        return buf.getvalue()
 
     def _call_ocr_space(self, image_bytes: bytes) -> Tuple[str, Optional[str], Optional[Dict]]:
         # Compress if needed, then build the OCR.space request payload.
