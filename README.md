@@ -47,6 +47,10 @@ Key capabilities:
 
 ## Architecture
 
+![Besayfe Risk API Architecture Diagram](diagrams/Besayfe%20Risk%20API%20Architecture.png)
+
+**Text representation:**
+
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                        Interfaces                              │
